@@ -1,67 +1,63 @@
-using Flows, VectorPairs
-
+# ///////////////////
 # Nonlinear equations
-struct LorNLinEq 
-    ρ::Float64
-end 
+# ///////////////////
+struct LorNLinEq end 
 
-function (eq::LorNLinEq)(t::Real, u::AbstractVector, dudt::AbstractVector)
+function (eq::LorNLinEq)(t, u, dudt)
     x, y, z = u
-    dudt[1] =   10 * (y - x)
-    dudt[2] =   eq.ρ *  x - y - x*z
-    dudt[3] = -8/3 * z + x*y
+    @inbounds dudt[1] =  10 * (y - x)
+    @inbounds dudt[2] =  28 *  x - y - x*z
+    @inbounds dudt[3] = -8/3 * z + x*y
     return dudt
 end
 
-# Linearised equations
-mutable struct LorLinEq{M<:Flows.AbstractMonitor, F}
-        mon::M
-          χ::Float64
-    forcing::F
-          u::Vector{Float64}
-       dudt::Vector{Float64}
-end
 
-LorLinEq(mon::M, 
-         χ::Real=0, 
-         forcing::Base.Callable=zero_forcing) where {M<:Flows.AbstractMonitor} =
-    LorLinEq{M, typeof(forcing)}(mon, χ, forcing, zeros(3), zeros(3))
-
-
-# Linearised equations
-function (eq::LorLinEq)(t::Real, v::AbstractVector, dvdt::AbstractVector)
-    x′, y′, z′ = v
-
-    # interpolate solution
-    eq.mon(eq.u,    t, Val{0}())
-    eq.mon(eq.dudt, t, Val{1}())
-
-    # extract components
-    x, y, z = eq.u
-
-    # homogeneous linear part is the default
-    dvdt[1] =  10 * (y′ - x′)
-    dvdt[2] =  (28-z)*x′ - y′ - x*z′
-    dvdt[3] = -8/3*z′ + x*y′ + x′*y
-
-    # add forcing (can be nothing)
-    eq.forcing(t, eq.u, eq.dudt, v, dvdt)
-
-    # add χ⋅dudt id needed
-    if eq.χ != 0
-        dvdt[1] += eq.χ * (   10 * (y - x) )
-        dvdt[2] += eq.χ * (   28 * x - y - x*z )
-        dvdt[3] += eq.χ * ( -8/3 * z + x*y )
-    end
-    
-    return dvdt
-end
+# //////////////////////////////////////////////
+# FORCING FUNCTIONS FOR THE LINEARISED EQUATIONS
+# Note that by default these functions add to 
+# their last inputs, which is the only argument
+# that gets modified
+# //////////////////////////////////////////////
 
 # sensitivity with respect to rho
 dfdρ_forcing(t, u, dudt, v, dvdt) = (@inbounds dvdt[2] += u[1]; dvdt)
 
-# no forcing (for the homogeneous equation)
+# no forcing does nothing (for the homogeneous equation)
 zero_forcing(t, u, dudt, v, dvdt) = (dvdt)
 
-# forcing dxdt
-f_forcing(t, u, dudt, v, dvdt) = (dvdt .+= dudt; dvdt)
+# forcing based on the vector field (note this is a closure)
+f_forcing(χ) = wrapped(t, u, dudt, v, dvdt) = (dvdt .+= χ.*dudt; dvdt)
+
+
+# ////////////////////
+# Linearised equations
+# ////////////////////
+struct LorLinEq{N, T<:NTuple{N, Base.Callable}}
+    forcings::T # a tuple of functions with signature (t, u, dudt, v, dvdt)
+end
+
+# slurp arguments
+LorLinEq(x::Vararg{Any, N}) where {N} = LorLinEq{N, typeof(x)}(x)
+
+# defaults to homogeneous problem
+LorLinEq() = LorLinEq(zero_forcing)
+
+
+# Linearised equations
+@generated function (eq::LorLinEq{N})(t, u, dudt, v, dvdt) where {N}
+    quote
+        # unpack
+        x , y , z  = u
+        x′, y′, z′ = v
+
+        # homogeneous linear part
+        @inbounds dvdt[1] =  10 * (y′ - x′)
+        @inbounds dvdt[2] =  (28-z)*x′ - y′ - x*z′
+        @inbounds dvdt[3] = -8/3*z′ + x*y′ + x′*y
+
+        # add forcing (can be nothing too)
+        Base.Cartesian.@nexprs $N i->eq.forcings[i](t, u, dudt, v, dvdt)
+
+        return dvdt
+    end
+end

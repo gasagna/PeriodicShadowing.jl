@@ -1,7 +1,7 @@
 module PeriodicShadowing
 
-using VectorPairs
-using BorderedMatrices
+import BorderedMatrices: BorderedMatrix,
+                         BorderedVector
 
 import Flows
 
@@ -9,9 +9,9 @@ export get_shooting_points,
        solve_ps_plc_tan,
        solve_ps_opt_tan,
        ith_span,
-       quad_χ,
-       DualForcing,
        quadrature
+    #    quad_χ,
+    #    DualForcing,
 
 # ////// UTILS //////
 
@@ -29,27 +29,46 @@ _blockrng(i::Integer, n::Integer) = ((i-1)*n+1):(i*n)
 ith_span(i::Int, N::Int, T::Real) =  ((i-1)*T/N, i*T/N)
 
 # quadrature function
-quad_χ(t, x::VectorPair, dqdt) =
-    (dqdt[1] = dot(x.v1, x.v2); dqdt[2] = dot(x.v2, x.v2); dqdt)
+# quad_χ(t, x::VectorPair, dqdt) =
+    # (dqdt[1] = dot(x.v1, x.v2); dqdt[2] = dot(x.v2, x.v2); dqdt)
 
-# used to calculate the quadratures for the calculation of χᵒ
-function DualForcing(f1, f2)
-    function wrapper(t, u, v::VectorPair, dvdt::VectorPair)
-        f1(t, u, v.v1, dvdt.v1)
-        f2(t, u, v.v2, dvdt.v2)
-        return dvdt
-    end
-    return wrapper
-end
+# # used to calculate the quadratures for the calculation of χᵒ
+# function DualForcing(f1, f2)
+#     function wrapper(t, u, v::VectorPair, dvdt::VectorPair)
+#         f1(t, u, v.v1, dvdt.v1)
+#         f2(t, u, v.v2, dvdt.v2)
+#         return dvdt
+#     end
+#     return wrapper
+# end
 
-function quadrature(ρquad)
-    function wrapped!(y0s::AbstractVector, q0::AbstractVector, T::Real)
-        N = length(y0s)
-        for i = 1:N
-            ρquad(y0s[i], q0, ith_span(i, N, T))
-        end
-        return q0./T
+# Calculate an integral associated to the solution of the linearised equations, 
+# for instance, the integral that gives the sensitivity of the mean. If
+# the average is need, remeber to divide by the period T!
+#
+# Arguments
+# ---------
+# ρquad : input - a propagator for the coupled linear/nonlinear equations
+#                  with quadrature integration capabilities
+# y0s   : input - vector of initial conditions of the solution of
+#                 Periodic Shadowing
+# x0s   : input - vector of shooting points
+# q0    : input - the initial condition for the quadrature components
+# T     : input - total time. 
+function quadrature(ρquad,
+                    y0s::AbstractVector{X},
+                    x0s::AbstractVector{X},
+                    q0::AbstractVector,
+                    T::Real) where {X<:AbstractVector}
+    N = length(y0s)
+    tmp_x = similar(x0s[1])
+    tmp_y = similar(y0s[1])
+    for i = 1:N
+        tmp_x .= x0s[i]
+        tmp_y .= y0s[i]
+        ρquad(couple(tmp_x, tmp_y), q0, ith_span(i, N, T))
     end
+    return q0
 end
 
 # ////// BUILDING BLOCKS //////
@@ -76,7 +95,7 @@ function _build_lhs_block!(Y::AbstractMatrix{U},
     for i = 1:n                                     #
         y .= 0; y[i] = one(U)                       # reset initial conditions
         xcp .= x                                    #
-        Y[:, i] = last(ψ(Flows.couple(x, y), span)) # propagate and store
+        Y[:, i] = last(ψ(Flows.couple(xcp, y), span)) # propagate and store
     end                                             #
     return Y                                        # return
 end
@@ -174,8 +193,8 @@ function _build_rhs_all(ρ,
     # fill main block with negative
     for i = 1:N
         b[_blockrng(i+1, n)] .-= _build_rhs_block!(ρ,
-                                                  ith_span(i, N, T),
-                                                  x0s[i], tmp1, tmp2)
+                                                   ith_span(i, N, T),
+                                                   x0s[i], tmp1, tmp2)
     end
 
     return b
@@ -228,8 +247,8 @@ function _build_system_plc(ψ,
     f0[_blockrng(1, n)] .= f(0.0, x0s[1], tmp1)
 
     # construct bordered matrix and vector
-    B = BorderedMatrix(build_ms_matrix(ψ, x0s, T), fT, f0, 0.0)
-    b = BorderedVector(build_ms_vector(ρ, x0s, T), 0.0)
+    B = BorderedMatrix(_build_lhs_all(ψ, x0s, T), fT, f0, 0.0)
+    b = BorderedVector(_build_rhs_all(ρ, x0s, T), 0.0)
 
     return B, b
 end
@@ -253,7 +272,7 @@ end
 # Tp/T : the period gradient
 function solve_ps_plc_tan(ψ, ρ, ϕ, f, x0s::Vector{<:AbstractVector}, T::Real)
     # build system
-    B, b = build_system_plc(ψ, ρ, ϕ, f, x0s, T)
+    B, b = _build_system_plc(ψ, ρ, ϕ, f, x0s, T)
 
     # solve out of place
     A_ldiv_B!(B, b, :BEM, false)
@@ -282,49 +301,49 @@ end
 # y0s  : a vector containing the initial conditions of the solution at the
 #        beginning of the shooting intervals
 # Tp/T : the period gradient
-function solve_ps_opt_tan(ψ,
-                          ρ_p,
-                          ρ_f,
-                          ρ_quad,
-                          x0s::Vector{X},
-                          T::Real) where {X<:AbstractVector}
-    # get sizes
-    N, n = length(x0s), length(x0s[1])
+# function solve_ps_opt_tan(ψ,
+#                           ρ_p,
+#                           ρ_f,
+#                           ρ_quad,
+#                           x0s::Vector{X},
+#                           T::Real) where {X<:AbstractVector}
+#     # get sizes
+#     N, n = length(x0s), length(x0s[1])
 
-    # build ms matrix
-    A = _build_lhs_all(ψ, x0s, T)
+#     # build ms matrix
+#     A = _build_lhs_all(ψ, x0s, T)
 
-    # factorise ms matrix
-    luA = lufact(A)
+#     # factorise ms matrix
+#     luA = lufact(A)
 
-    # obtain two right hand sides
-    a_p = _build_rhs_all(ρ_p, x0s, T)
-    a_f = _build_rhs_all(ρ_f, x0s, T)
+#     # obtain two right hand sides
+#     a_p = _build_rhs_all(ρ_p, x0s, T)
+#     a_f = _build_rhs_all(ρ_f, x0s, T)
 
-    # solve two problems
-    _y0s_p = A_ldiv_B!(similar(a_p), luA, a_p)
-    _y0s_f = A_ldiv_B!(        a_p,  luA, a_f)
+#     # solve two problems
+#     _y0s_p = A_ldiv_B!(similar(a_p), luA, a_p)
+#     _y0s_f = A_ldiv_B!(        a_p,  luA, a_f)
 
-    # and unpack into a vector of elements of type X
-    y0s_p = map(1:N) do i
-              X(_y0s_p[_blockrng(i, n)])
-            end
+#     # and unpack into a vector of elements of type X
+#     y0s_p = map(1:N) do i
+#               X(_y0s_p[_blockrng(i, n)])
+#             end
 
-    y0s_f = map(1:N) do i
-              X(_y0s_f[_blockrng(i, n)])
-            end
+#     y0s_f = map(1:N) do i
+#               X(_y0s_f[_blockrng(i, n)])
+#             end
 
-    # compute quadratures and the ratio
-    out = ρ_quad(VectorPair.(y0s_p, y0s_f), zeros(2), T)
-    χ_opt = -out[1]/out[2]
+#     # compute quadratures and the ratio
+#     out = ρ_quad(VectorPair.(y0s_p, y0s_f), zeros(2), T)
+#     χ_opt = -out[1]/out[2]
 
-    # now compute actual solution
-    y0s = map(1:N) do i
-        X(_y0s_p[_blockrng(i, n)] .+ χ_opt.*_y0s_f[_blockrng(i, n)])
-    end
+#     # now compute actual solution
+#     y0s = map(1:N) do i
+#         X(_y0s_p[_blockrng(i, n)] .+ χ_opt.*_y0s_f[_blockrng(i, n)])
+#     end
 
-    # return solution
-    return y0s, χ_opt
-end
+#     # return solution
+#     return y0s, χ_opt
+# end
 
 end
