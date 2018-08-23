@@ -66,7 +66,7 @@ function quadrature(ρquad,
     for i = 1:N
         tmp_x .= x0s[i]
         tmp_y .= y0s[i]
-        ρquad(couple(tmp_x, tmp_y), q0, ith_span(i, N, T))
+        ρquad(Flows.couple(tmp_x, tmp_y), q0, ith_span(i, N, T))
     end
     return q0
 end
